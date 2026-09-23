@@ -12,6 +12,6 @@ import {MoistureStageBadgeComponent} from '../components/common/MoistureStageBad
 export class LotsPageComponent {
   readonly store=inject(AppStore);
   showForm=false; error=''; draft={lot_code:'LOT-20260822-A',kiln_id:'',species:'白橡',thickness_mm:32,volume_m3:12,initial_moisture_pct:42,target_moisture_pct:10,quality_grade:'待检'};
-  async create(){try{this.draft.kiln_id ||= this.store.kilns()[0]?.id || '';await lotApi.create(this.draft);this.showForm=false;await this.store.refresh()}catch(error){this.error=error instanceof Error?error.message:'保存失败'}}
-  async transition(id:string,state:string){if(!state)return;try{await lotApi.transition(id,state);await this.store.refresh()}catch(error){this.error=error instanceof Error?error.message:'状态更新失败'}}
+  async create(){try{this.draft.kiln_id ||= this.store.kilns()[0]?.id || '';await lotApi.create(this.draft);this.showForm=false;this.error='';await this.store.refresh()}catch(error){this.error=error instanceof Error?error.message:'保存失败'}}
+  async transition(id:string,state:string){if(!state)return;try{await lotApi.transition(id,state);this.error='';await this.store.refresh()}catch(error){const message=error instanceof Error?error.message:'状态更新失败';this.error=/missing frozen|missing_plan/.test(message)?'最新曲线计划尚未冻结，批次保留在均衡阶段：请先重新计算、审核并冻结计划。':message}}
 }

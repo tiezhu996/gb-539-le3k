@@ -59,10 +59,10 @@ type MoistureReading struct {
 
 type DryingSchedule struct {
 	ID                     string     `gorm:"primaryKey" json:"id"`
-	TimberLotID            string     `gorm:"index;not null;uniqueIndex:idx_schedule_input" json:"timber_lot_id"`
+	TimberLotID            string     `gorm:"index;not null" json:"timber_lot_id"`
 	KilnSnapshot           string     `json:"kiln_snapshot"`
-	AlgorithmVersion       string     `gorm:"uniqueIndex:idx_schedule_input" json:"algorithm_version"`
-	InputHash              string     `gorm:"uniqueIndex:idx_schedule_input" json:"input_hash"`
+	AlgorithmVersion       string     `json:"algorithm_version"`
+	InputHash              string     `json:"input_hash"`
 	IdempotencyKey         string     `gorm:"index" json:"idempotency_key"`
 	RuleSetVersion         string     `json:"rule_set_version"`
 	StagesJSON             string     `json:"stages_json"`
@@ -78,10 +78,21 @@ type DryingSchedule struct {
 	FrozenSnapshot         string     `json:"frozen_snapshot"`
 	BaselineScheduleID     string     `gorm:"index" json:"baseline_schedule_id"`
 	ComparisonJSON         string     `json:"comparison_json"`
-	CalculatedAt           time.Time  `json:"calculated_at"`
-	CreatedBy              string     `json:"created_by"`
-	ReviewedBy             string     `json:"reviewed_by"`
-	Version                int        `json:"version"`
+	// ExpiredAt marks plans whose calculation basis (kiln/lot snapshot plus the
+	// accepted readings) was invalidated by a reading backfill, void, or
+	// correction. Expiry never mutates the lifecycle state or clears a frozen
+	// snapshot; the plan only remains readable for audit and comparison.
+	ExpiredAt      *time.Time `gorm:"index" json:"expired_at"`
+	ExpiredBy      string     `json:"expired_by"`
+	ExpiryReason   string     `json:"expiry_reason"`
+	SupersededByID string     `gorm:"index" json:"superseded_by_id"`
+	// SupersedesID links a recalculated plan back to the most recent plan it
+	// replaces; SupersededByID closes the relation on that old record.
+	SupersedesID string    `gorm:"index" json:"supersedes_id"`
+	CalculatedAt time.Time `json:"calculated_at"`
+	CreatedBy    string    `json:"created_by"`
+	ReviewedBy   string    `json:"reviewed_by"`
+	Version      int       `json:"version"`
 }
 
 type User struct {

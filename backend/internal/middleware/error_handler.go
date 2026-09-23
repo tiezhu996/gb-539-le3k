@@ -21,7 +21,9 @@ func ErrorHandler() gin.HandlerFunc {
 		}
 		if errors.Is(err, service.ErrConflict) {
 			status = 409
-			code = "conflict"
+			if code = service.ConflictCode(err); code == "" {
+				code = "conflict"
+			}
 		}
 		if errors.Is(err, service.ErrForbidden) {
 			status = 403

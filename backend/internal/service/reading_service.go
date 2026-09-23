@@ -16,9 +16,10 @@ import (
 )
 
 type ReadingService struct {
-	Repo  repository.ReadingRepository
-	Lots  repository.LotRepository
-	Audit AuditService
+	Repo      repository.ReadingRepository
+	Lots      repository.LotRepository
+	Schedules ScheduleService
+	Audit     AuditService
 }
 
 type ReadingAssessment struct {
@@ -58,12 +59,19 @@ func (s ReadingService) Void(ctx context.Context, id string, input dto.ReadingVo
 	}
 	before := reading
 	now := time.Now().UTC()
-	updated, err := s.Repo.Void(ctx, id, input.Version, actor, input.Reason, now)
-	if err != nil {
+	if err := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updated, txErr := s.Repo.VoidWithDB(ctx, tx, id, input.Version, actor, input.Reason, now)
+		if txErr != nil {
+			return txErr
+		}
+		if !updated {
+			return ErrConflict
+		}
+		// A voided measurement removes part of every plan's calculation basis,
+		// so the lot's still-actionable plans expire in the same unit of work.
+		return s.Schedules.ExpireStalePlans(ctx, tx, reading.TimberLotID, actor, requestID, constants.ScheduleExpiryReadingVoided)
+	}); err != nil {
 		return reading, err
-	}
-	if !updated {
-		return reading, ErrConflict
 	}
 	reading.ReadingQuality, reading.VoidedAt, reading.VoidedBy, reading.VoidReason, reading.Version = "voided", &now, actor, input.Reason, reading.Version+1
 	_ = s.Audit.Record(ctx, requestID, "reading", id, "voided", actor, before, reading)
@@ -114,7 +122,12 @@ func (s ReadingService) Correct(ctx context.Context, id string, input dto.Readin
 				return fmt.Errorf("duplicate source reading: %w", ErrConflict)
 			}
 		}
-		return s.Repo.CreateBatchWithDB(ctx, tx, replacements)
+		if err := s.Repo.CreateBatchWithDB(ctx, tx, replacements); err != nil {
+			return err
+		}
+		// The correction rewrites the measurement basis, so prior plans for
+		// this batch are stale even when they were already frozen.
+		return s.Schedules.ExpireStalePlans(ctx, tx, current.TimberLotID, actor, requestID, constants.ScheduleExpiryReadingCorrected)
 	}); err != nil {
 		return nil, err
 	}
@@ -154,7 +167,12 @@ func (s ReadingService) Import(ctx context.Context, input dto.ReadingImport, act
 		}
 	}
 	if err := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Create(&created).Error
+		if err := tx.Create(&created).Error; err != nil {
+			return err
+		}
+		// A backfill changes the series every prior plan was calculated from,
+		// so the batch's active plans expire together with the import.
+		return s.Schedules.ExpireStalePlans(ctx, tx, input.TimberLotID, actor, requestID, constants.ScheduleExpiryReadingBackfilled)
 	}); err != nil {
 		return nil, err
 	}

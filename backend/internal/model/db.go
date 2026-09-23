@@ -23,7 +23,30 @@ func Open(driver, dsn string) (*gorm.DB, error) {
 	if err := db.AutoMigrate(&DryingKiln{}, &TimberLot{}, &MoistureReading{}, &DryingSchedule{}, &User{}, &AuditEvent{}); err != nil {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
+	if err := enforceActiveScheduleInputUniqueness(db); err != nil {
+		return nil, fmt.Errorf("schedule input uniqueness index: %w", err)
+	}
 	return db, nil
+}
+
+// enforceActiveScheduleInputUniqueness replaces the historical full-unique
+// (lot, algorithm, input_hash) index with a partial index covering only
+// non-expired plans. Re-importing readings expires prior plans and may reuse
+// an identical hash on the recalculated successor; expired history must still
+// be retained side by side.
+func enforceActiveScheduleInputUniqueness(db *gorm.DB) error {
+	switch db.Dialector.Name() {
+	case "postgres":
+		if err := db.Exec("DROP INDEX IF EXISTS idx_schedule_input").Error; err != nil {
+			return err
+		}
+		return db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_active_input ON drying_schedules (timber_lot_id, algorithm_version, input_hash) WHERE expired_at IS NULL").Error
+	default:
+		if err := db.Exec("DROP INDEX IF EXISTS idx_schedule_input").Error; err != nil {
+			return err
+		}
+		return db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_active_input ON drying_schedules (timber_lot_id, algorithm_version, input_hash) WHERE expired_at IS NULL").Error
+	}
 }
 
 func Seed(db *gorm.DB) error {

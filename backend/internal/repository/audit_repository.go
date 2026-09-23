@@ -8,6 +8,9 @@ import (
 
 type AuditRepository struct{ DB *gorm.DB }
 
+// WithDB returns an audit repository bound to the given transaction.
+func (r AuditRepository) WithDB(db *gorm.DB) AuditRepository { return AuditRepository{DB: db} }
+
 func (r AuditRepository) Create(ctx context.Context, event *model.AuditEvent) error {
 	return r.DB.WithContext(ctx).Create(event).Error
 }

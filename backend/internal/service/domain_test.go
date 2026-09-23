@@ -30,8 +30,9 @@ func testServices(t *testing.T) (context.Context, *model.DryingKiln, *model.Timb
 	}
 	audit := AuditService{Repo: repository.AuditRepository{DB: db}}
 	lots := LotService{Repo: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Audit: audit}
-	readings := ReadingService{Repo: repository.ReadingRepository{DB: db}, Lots: repository.LotRepository{DB: db}, Audit: audit}
 	schedules := ScheduleService{Repo: repository.ScheduleRepository{DB: db}, Lots: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Readings: repository.ReadingRepository{DB: db}, Audit: audit}
+	lots.Schedules = schedules
+	readings := ReadingService{Repo: repository.ReadingRepository{DB: db}, Lots: repository.LotRepository{DB: db}, Schedules: schedules, Audit: audit}
 	return context.Background(), kiln, lot, lots, readings, schedules
 }
 

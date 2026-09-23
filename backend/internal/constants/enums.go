@@ -30,6 +30,21 @@ var MoistureStages = []string{MoistureGreen, MoistureFiberSaturation, MoistureBo
 var LotStates = []string{LotQueued, LotConditioning, LotDrying, LotEqualizing, LotCompleted, LotAborted}
 var ScheduleStates = []string{ScheduleDraft, ScheduleCalculating, ScheduleProposed, ScheduleFailed, ScheduleReviewed, ScheduleAccepted, ScheduleVoided}
 
+// Schedule expiry reasons describe why a plan no longer reflects a lot's
+// current measurement basis. They are stored verbatim so the UI can show them
+// without replaying the originating reading change.
+const (
+	ScheduleExpiryReadingBackfilled = "reading_backfilled"
+	ScheduleExpiryReadingVoided     = "reading_voided"
+	ScheduleExpiryReadingCorrected  = "reading_corrected"
+)
+
+var ScheduleExpiryReasons = []string{ScheduleExpiryReadingBackfilled, ScheduleExpiryReadingVoided, ScheduleExpiryReadingCorrected}
+
+// ScheduleExpirableStates are the lifecycle states a plan can be referenced and
+// acted upon from. Terminal and transient states are never marked expired.
+var ScheduleExpirableStates = []string{ScheduleProposed, ScheduleReviewed, ScheduleAccepted}
+
 func ValidRole(role string) bool {
 	switch role {
 	case "admin", "kiln_engineer", "quality_analyst", "reviewer", "auditor":

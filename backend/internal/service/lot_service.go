@@ -14,9 +14,10 @@ import (
 )
 
 type LotService struct {
-	Repo  repository.LotRepository
-	Kilns repository.KilnRepository
-	Audit AuditService
+	Repo      repository.LotRepository
+	Kilns     repository.KilnRepository
+	Schedules ScheduleService
+	Audit     AuditService
 }
 
 func (s LotService) List(ctx context.Context) ([]model.TimberLot, error) { return s.Repo.List(ctx) }
@@ -51,6 +52,14 @@ func (s LotService) Transition(ctx context.Context, id, next, actor, requestID s
 	}
 	if version != item.Version {
 		return item, ErrConflict
+	}
+	// Leaving equalizing for completion is only allowed while the latest plan
+	// for the current measurement basis is frozen; an expired or missing plan
+	// keeps the batch in equalizing with a missing_plan conflict.
+	if next == constants.LotCompleted {
+		if err := s.Schedules.RequireLatestFrozenPlan(ctx, id); err != nil {
+			return item, err
+		}
 	}
 	before := item
 	updated, err := s.Repo.Transition(ctx, item.ID, item.LotState, next, item.Version)
