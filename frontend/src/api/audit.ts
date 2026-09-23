@@ -1,0 +1,1 @@
+import {request} from './client'; import type {DryingSchedule} from '../types/entities'; export interface AuditEvent {id:string;request_id:string;entity:string;entity_id:string;action:string;actor_id:string;created_at:string;before_json:string;after_json:string} export const auditApi = {list:()=>request<AuditEvent[]>('/audit')};

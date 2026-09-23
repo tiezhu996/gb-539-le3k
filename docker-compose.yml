@@ -1,0 +1,51 @@
+name: timber-kiln-drying-optimizer
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kilncurve}
+      POSTGRES_USER: ${POSTGRES_USER:-kilncurve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kilncurve}
+    ports:
+      - "${DB_PORT:-57539}:5432"
+    volumes:
+      - kilncurve-db:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kilncurve} -d ${POSTGRES_DB:-kilncurve}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  backend:
+    build: ./backend
+    environment:
+      PORT: 8080
+      DB_DRIVER: postgres
+      DB_DSN: host=db user=${POSTGRES_USER:-kilncurve} password=${POSTGRES_PASSWORD:-kilncurve} dbname=${POSTGRES_DB:-kilncurve} port=5432 sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-replace-with-a-long-random-secret}
+    ports:
+      - "${BACKEND_PORT:-19539}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-18539}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  kilncurve-db:

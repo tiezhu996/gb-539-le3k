@@ -1,0 +1,2 @@
+import {request} from './client'; import type {DryingSchedule} from '../types/entities';
+export const scheduleApi = { list:()=>request<DryingSchedule[]>('/schedules'), get:(id:string)=>request<DryingSchedule>(`/schedules/${id}`), calculate:(lotId:string)=>request<DryingSchedule>('/schedules/calculate',{method:'POST',body:JSON.stringify({timber_lot_id:lotId})}), review:(id:string,decision:string,note='')=>request<DryingSchedule>(`/schedules/${id}/review`,{method:'POST',body:JSON.stringify({decision,note})}) };

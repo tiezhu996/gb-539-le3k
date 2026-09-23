@@ -1,0 +1,13 @@
+.env
+.DS_Store
+*.log
+.idea/
+.vscode/
+node_modules/
+frontend/dist/
+backend/.kilncurve/
+*.sqlite
+*.db
+output/*.png
+output/*.jpg
+!output/execution.md

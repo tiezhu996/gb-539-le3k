@@ -1,0 +1,2 @@
+import {request} from './client'; import type {DryingKiln} from '../types/entities';
+export const kilnApi = { list:()=>request<DryingKiln[]>('/kilns'), get:(id:string)=>request<DryingKiln>(`/kilns/${id}`), create:(input:Partial<DryingKiln>)=>request<DryingKiln>('/kilns',{method:'POST',body:JSON.stringify(input)}), update:(id:string,input:Partial<DryingKiln>)=>request<DryingKiln>(`/kilns/${id}`,{method:'PUT',body:JSON.stringify(input)}) };

@@ -1,0 +1,2 @@
+import {request} from './client'; import type {TimberLot} from '../types/entities';
+export const lotApi = { list:()=>request<TimberLot[]>('/lots'), get:(id:string)=>request<TimberLot>(`/lots/${id}`), create:(input:Partial<TimberLot>)=>request<TimberLot>('/lots',{method:'POST',body:JSON.stringify(input)}), transition:async(id:string,state:string)=>{const lot=await request<TimberLot>(`/lots/${id}`);return request<TimberLot>(`/lots/${id}/transition`,{method:'POST',body:JSON.stringify({state,version:lot.version})})} };
