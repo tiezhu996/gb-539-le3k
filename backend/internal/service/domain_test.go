@@ -29,9 +29,11 @@ func testServices(t *testing.T) (context.Context, *model.DryingKiln, *model.Timb
 		t.Fatal(err)
 	}
 	audit := AuditService{Repo: repository.AuditRepository{DB: db}}
-	lots := LotService{Repo: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Audit: audit}
+	scheduleRepo := repository.ScheduleRepository{DB: db}
+	lots := LotService{Repo: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Schedules: scheduleRepo, Audit: audit}
 	readings := ReadingService{Repo: repository.ReadingRepository{DB: db}, Lots: repository.LotRepository{DB: db}, Audit: audit}
-	schedules := ScheduleService{Repo: repository.ScheduleRepository{DB: db}, Lots: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Readings: repository.ReadingRepository{DB: db}, Audit: audit}
+	schedules := ScheduleService{Repo: scheduleRepo, Lots: repository.LotRepository{DB: db}, Kilns: repository.KilnRepository{DB: db}, Readings: repository.ReadingRepository{DB: db}, Audit: audit}
+	readings.Schedules = schedules
 	return context.Background(), kiln, lot, lots, readings, schedules
 }
 
@@ -176,5 +178,164 @@ func TestScheduleFreezeAndHistoricalComparison(t *testing.T) {
 	}
 	if _, err = schedules.Compare(ctx, current.ID, other.ID, "analyst", "history-10"); !errors.Is(err, ErrValidation) {
 		t.Fatalf("cross-lot comparison error = %v", err)
+	}
+}
+
+// setupCalculatedPlan moves a lot into conditioning, imports readings and
+// produces a proposed schedule that the reviewer can accept in tests.
+func setupCalculatedPlan(ctx context.Context, t *testing.T, lot *model.TimberLot, lots LotService, readings ReadingService, schedules ScheduleService) model.DryingSchedule {
+	t.Helper()
+	measured := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	input := dto.ReadingImport{TimberLotID: lot.ID, Readings: []dto.ReadingInput{{SamplePosition: "core", MeasuredAt: measured, MoisturePct: 44, DryBulbC: 50, WetBulbC: 44}, {SamplePosition: "surface", MeasuredAt: measured, MoisturePct: 43, DryBulbC: 50, WetBulbC: 44}}}
+	if _, err := readings.Import(ctx, input, "analyst", "setup-1"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := schedules.Calculate(ctx, dto.ScheduleCalculate{TimberLotID: lot.ID}, "engineer", "setup-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+func TestReadingChangesExpireActiveAndFrozenPlans(t *testing.T) {
+	ctx, _, lot, lots, readings, schedules := testServices(t)
+	transitioned, err := lots.Transition(ctx, lot.ID, constants.LotConditioning, "engineer", "expire-1", lot.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lot = &transitioned
+	plan := setupCalculatedPlan(ctx, t, lot, lots, readings, schedules)
+	plan, err = schedules.Review(ctx, plan.ID, constants.ScheduleAccepted, "approved", "reviewer", "expire-2", plan.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = schedules.Freeze(ctx, plan.ID, "reviewer", "expire-3", plan.Version)
+	if err != nil || plan.FrozenSnapshot == "" {
+		t.Fatalf("freeze = %+v, %v", plan, err)
+	}
+
+	later := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	supplement := dto.ReadingImport{TimberLotID: lot.ID, Readings: []dto.ReadingInput{{SamplePosition: "surface", MeasuredAt: later, MoisturePct: 40, DryBulbC: 52, WetBulbC: 43}}}
+	if _, err = readings.Import(ctx, supplement, "analyst", "expire-4"); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := schedules.Get(ctx, plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired.ScheduleState != constants.ScheduleSuperseded || expired.SupersededAt == nil || expired.SupersededReason != SupersedeReadingSupplemented {
+		t.Fatalf("expired plan = %+v", expired)
+	}
+	// A frozen plan keeps its snapshot after expiration.
+	if expired.FrozenAt == nil || expired.FrozenBy == "" || expired.FrozenSnapshot == "" {
+		t.Fatalf("frozen snapshot must survive supersession: %+v", expired)
+	}
+	// Expired plans can no longer be reviewed or frozen.
+	if _, err = schedules.Review(ctx, expired.ID, "reviewed", "", "reviewer", "expire-5", expired.Version); !errors.Is(err, ErrConflict) {
+		t.Fatalf("review expired error = %v", err)
+	}
+	if _, err = schedules.Freeze(ctx, expired.ID, "reviewer", "expire-6", expired.Version); !errors.Is(err, ErrConflict) {
+		t.Fatalf("freeze expired error = %v", err)
+	}
+
+	current, err := schedules.Calculate(ctx, dto.ScheduleCalculate{TimberLotID: lot.ID}, "engineer", "expire-7")
+	if err != nil || current.ID == plan.ID {
+		t.Fatalf("recalculation = %+v, %v", current, err)
+	}
+	if current.SupersedesScheduleID != plan.ID {
+		t.Fatalf("new plan must point at superseded plan, got %q", current.SupersedesScheduleID)
+	}
+	linked, err := schedules.Get(ctx, plan.ID)
+	if err != nil || linked.SupersededByID != current.ID {
+		t.Fatalf("old plan replacement link = %+v, %v", linked, err)
+	}
+	var supersessionEvents int64
+	if err = schedules.Repo.DB.Model(&model.AuditEvent{}).Where("entity = ? AND entity_id = ? AND action = ?", "schedule", plan.ID, "superseded").Count(&supersessionEvents).Error; err != nil || supersessionEvents != 1 {
+		t.Fatalf("superseded audit events = %d, %v", supersessionEvents, err)
+	}
+}
+
+func TestVoidAndCorrectExpirePlansWithDistinctReasons(t *testing.T) {
+	ctx, _, lot, lots, readings, schedules := testServices(t)
+	transitioned, err := lots.Transition(ctx, lot.ID, constants.LotConditioning, "engineer", "reason-1", lot.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lot = &transitioned
+	plan := setupCalculatedPlan(ctx, t, lot, lots, readings, schedules)
+	accepted, err := readings.Repo.Accepted(ctx, lot.ID)
+	if err != nil || len(accepted) == 0 {
+		t.Fatalf("accepted readings = %+v, %v", accepted, err)
+	}
+	if _, err = readings.Void(ctx, accepted[0].ID, dto.ReadingVoid{Reason: "instrument probe failed on site", Version: accepted[0].Version}, "analyst", "reason-2"); err != nil {
+		t.Fatal(err)
+	}
+	voidedPlan, err := schedules.Get(ctx, plan.ID)
+	if err != nil || voidedPlan.ScheduleState != constants.ScheduleSuperseded || voidedPlan.SupersededReason != SupersedeReadingVoided {
+		t.Fatalf("void expiry = %+v, %v", voidedPlan, err)
+	}
+
+	secondInput := dto.ReadingImport{TimberLotID: lot.ID, Readings: []dto.ReadingInput{{SamplePosition: "core", MeasuredAt: time.Now().UTC().Add(-20 * time.Second).Format(time.RFC3339), MoisturePct: 41, DryBulbC: 50, WetBulbC: 44}}}
+	second, err := readings.Import(ctx, secondInput, "analyst", "reason-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replan, err := schedules.Calculate(ctx, dto.ScheduleCalculate{TimberLotID: lot.ID}, "engineer", "reason-4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	correction := dto.ReadingImport{TimberLotID: lot.ID, Readings: []dto.ReadingInput{{SamplePosition: "core", MeasuredAt: time.Now().UTC().Add(-10 * time.Second).Format(time.RFC3339), MoisturePct: 39, DryBulbC: 50, WetBulbC: 44}}}
+	if _, err = readings.Correct(ctx, second[0].ID, correction, "analyst", "reason-5", second[0].Version); err != nil {
+		t.Fatal(err)
+	}
+	correctedPlan, err := schedules.Get(ctx, replan.ID)
+	if err != nil || correctedPlan.ScheduleState != constants.ScheduleSuperseded || correctedPlan.SupersededReason != SupersedeReadingCorrected {
+		t.Fatalf("correct expiry = %+v, %v", correctedPlan, err)
+	}
+}
+
+func TestCompletionRequiresLatestPlanFrozen(t *testing.T) {
+	ctx, _, lot, lots, _, _ := testServices(t)
+	for _, next := range []string{constants.LotConditioning, constants.LotDrying, constants.LotEqualizing} {
+		moved, err := lots.Transition(ctx, lot.ID, next, "engineer", "complete-guard", lot.Version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lot = &moved
+	}
+	if _, err := lots.Transition(ctx, lot.ID, constants.LotCompleted, "engineer", "complete-guard", lot.Version); !errors.Is(err, ErrConflict) {
+		t.Fatalf("completion without frozen plan error = %v", err)
+	}
+	if stayed, err := lots.Get(ctx, lot.ID); err != nil || stayed.LotState != constants.LotEqualizing {
+		t.Fatalf("lot must stay equalizing, got %+v, %v", stayed, err)
+	}
+}
+
+func TestCompletionSucceedsWithFrozenLatestPlan(t *testing.T) {
+	ctx, _, lot, lots, readings, schedules := testServices(t)
+	moved, err := lots.Transition(ctx, lot.ID, constants.LotConditioning, "engineer", "complete-ok-1", lot.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lot = &moved
+	plan := setupCalculatedPlan(ctx, t, lot, lots, readings, schedules)
+	plan, err = schedules.Review(ctx, plan.ID, constants.ScheduleAccepted, "approved", "reviewer", "complete-ok-2", plan.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = schedules.Freeze(ctx, plan.ID, "reviewer", "complete-ok-3", plan.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []string{constants.LotDrying, constants.LotEqualizing} {
+		moved, err = lots.Transition(ctx, lot.ID, next, "engineer", "complete-ok-move", lot.Version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lot = &moved
+	}
+	done, err := lots.Transition(ctx, lot.ID, constants.LotCompleted, "engineer", "complete-ok-4", lot.Version)
+	if err != nil || done.LotState != constants.LotCompleted {
+		t.Fatalf("completion = %+v, %v", done, err)
 	}
 }

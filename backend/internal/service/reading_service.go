@@ -16,9 +16,10 @@ import (
 )
 
 type ReadingService struct {
-	Repo  repository.ReadingRepository
-	Lots  repository.LotRepository
-	Audit AuditService
+	Repo      repository.ReadingRepository
+	Lots      repository.LotRepository
+	Schedules ScheduleService
+	Audit     AuditService
 }
 
 type ReadingAssessment struct {
@@ -58,13 +59,25 @@ func (s ReadingService) Void(ctx context.Context, id string, input dto.ReadingVo
 	}
 	before := reading
 	now := time.Now().UTC()
-	updated, err := s.Repo.Void(ctx, id, input.Version, actor, input.Reason, now)
-	if err != nil {
-		return reading, err
+	var superseded []model.DryingSchedule
+	if txErr := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updated, txErr := s.Repo.VoidWithDB(ctx, tx, id, input.Version, actor, input.Reason, now)
+		if txErr != nil {
+			return txErr
+		}
+		if !updated {
+			return ErrConflict
+		}
+		expired, txErr := s.Schedules.ExpireActivePlans(ctx, tx, reading.TimberLotID, SupersedeReadingVoided, now)
+		if txErr != nil {
+			return txErr
+		}
+		superseded = expired
+		return nil
+	}); txErr != nil {
+		return reading, txErr
 	}
-	if !updated {
-		return reading, ErrConflict
-	}
+	s.Schedules.RecordSupersessionAudit(ctx, superseded, SupersedeReadingVoided, actor, requestID, now)
 	reading.ReadingQuality, reading.VoidedAt, reading.VoidedBy, reading.VoidReason, reading.Version = "voided", &now, actor, input.Reason, reading.Version+1
 	_ = s.Audit.Record(ctx, requestID, "reading", id, "voided", actor, before, reading)
 	return reading, nil
@@ -97,6 +110,7 @@ func (s ReadingService) Correct(ctx context.Context, id string, input dto.Readin
 	}
 	summary := assessReadings(replacements)
 	now := time.Now().UTC()
+	var superseded []model.DryingSchedule
 	if err := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		updated, txErr := s.Repo.VoidWithDB(ctx, tx, current.ID, version, actor, "replaced by corrected import", now)
 		if txErr != nil {
@@ -114,10 +128,19 @@ func (s ReadingService) Correct(ctx context.Context, id string, input dto.Readin
 				return fmt.Errorf("duplicate source reading: %w", ErrConflict)
 			}
 		}
-		return s.Repo.CreateBatchWithDB(ctx, tx, replacements)
+		if txErr := s.Repo.CreateBatchWithDB(ctx, tx, replacements); txErr != nil {
+			return txErr
+		}
+		expired, txErr := s.Schedules.ExpireActivePlans(ctx, tx, lot.ID, SupersedeReadingCorrected, now)
+		if txErr != nil {
+			return txErr
+		}
+		superseded = expired
+		return nil
 	}); err != nil {
 		return nil, err
 	}
+	s.Schedules.RecordSupersessionAudit(ctx, superseded, SupersedeReadingCorrected, actor, requestID, now)
 	voided := current
 	voided.ReadingQuality, voided.VoidedAt, voided.VoidedBy, voided.VoidReason, voided.Version = "voided", &now, actor, "replaced by corrected import", version+1
 	_ = s.Audit.Record(ctx, requestID, "reading", current.ID, "corrected", actor, current, struct {
@@ -153,11 +176,22 @@ func (s ReadingService) Import(ctx context.Context, input dto.ReadingImport, act
 			return nil, fmt.Errorf("duplicate source reading: %w", ErrConflict)
 		}
 	}
+	now := time.Now().UTC()
+	var superseded []model.DryingSchedule
 	if err := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Create(&created).Error
+		if txErr := tx.Create(&created).Error; txErr != nil {
+			return txErr
+		}
+		expired, txErr := s.Schedules.ExpireActivePlans(ctx, tx, lot.ID, SupersedeReadingSupplemented, now)
+		if txErr != nil {
+			return txErr
+		}
+		superseded = expired
+		return nil
 	}); err != nil {
 		return nil, err
 	}
+	s.Schedules.RecordSupersessionAudit(ctx, superseded, SupersedeReadingSupplemented, actor, requestID, now)
 	_ = s.Audit.Record(ctx, requestID, "reading", input.TimberLotID, "imported", actor, nil, struct {
 		Readings []model.MoistureReading
 		Quality  QualitySummary

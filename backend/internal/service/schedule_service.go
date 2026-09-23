@@ -19,12 +19,62 @@ import (
 
 const AlgorithmVersion = "curve-v2.0"
 
+// Supersession reasons recorded when reading maintenance invalidates plans.
+const (
+	SupersedeReadingSupplemented = "reading_supplemented"
+	SupersedeReadingVoided       = "reading_voided"
+	SupersedeReadingCorrected    = "reading_corrected"
+)
+
+func SupersedeReasonLabel(reason string) string {
+	switch reason {
+	case SupersedeReadingSupplemented:
+		return "读数补录"
+	case SupersedeReadingVoided:
+		return "读数作废"
+	case SupersedeReadingCorrected:
+		return "读数修正"
+	default:
+		return reason
+	}
+}
+
 type ScheduleService struct {
 	Repo     repository.ScheduleRepository
 	Lots     repository.LotRepository
 	Kilns    repository.KilnRepository
 	Readings repository.ReadingRepository
 	Audit    AuditService
+}
+
+// ExpireActivePlans marks every active plan of a lot as superseded inside the
+// caller's reading-maintenance transaction and returns the pre-change rows.
+// Frozen plans keep their snapshot; only the supersession marker changes, and
+// expired plans can no longer be acted on. Audit events are written after the
+// transaction commits via RecordSupersessionAudit.
+func (s ScheduleService) ExpireActivePlans(ctx context.Context, tx *gorm.DB, lotID, reason string, at time.Time) ([]model.DryingSchedule, error) {
+	before, err := s.Repo.ActiveForLot(ctx, lotID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = s.Repo.SupersedeBatchWithDB(ctx, tx, lotID, reason, at); err != nil {
+		return nil, err
+	}
+	return before, nil
+}
+
+// RecordSupersessionAudit writes one audit event per plan expired by a reading
+// change. It must be called only after the surrounding transaction commits so
+// the audit connection is not blocked by an open writer lock.
+func (s ScheduleService) RecordSupersessionAudit(ctx context.Context, before []model.DryingSchedule, reason, actor, requestID string, at time.Time) {
+	for _, item := range before {
+		after := item
+		after.ScheduleState = constants.ScheduleSuperseded
+		after.SupersededReason = reason
+		after.SupersededAt = &at
+		after.Version = item.Version + 1
+		_ = s.Audit.Record(ctx, requestID, "schedule", item.ID, "superseded", actor, item, after)
+	}
 }
 
 func (s ScheduleService) List(ctx context.Context) ([]model.DryingSchedule, error) {
@@ -72,6 +122,13 @@ func (s ScheduleService) Calculate(ctx context.Context, input dto.ScheduleCalcul
 
 	now := time.Now().UTC()
 	item := model.DryingSchedule{ID: util.ID(), TimberLotID: lot.ID, KilnSnapshot: util.JSON(kiln), AlgorithmVersion: AlgorithmVersion, RuleSetVersion: algorithm.RuleSetVersion, InputHash: inputHash, IdempotencyKey: input.IdempotencyKey, ScheduleState: constants.ScheduleCalculating, CalculatedAt: now, CreatedBy: actor, Version: 1}
+	// A recalculated plan points back at the most recent expired plan of the
+	// lot that has no replacement yet, keeping the version chain traceable.
+	predecessorVersion := 0
+	if predecessor, findErr := s.Repo.LatestUnlinkedSuperseded(ctx, lot.ID); findErr == nil {
+		item.SupersedesScheduleID = predecessor.ID
+		predecessorVersion = predecessor.Version
+	}
 	if err = s.Repo.Create(ctx, &item); err != nil {
 		if existing, findErr := s.Repo.ByHash(ctx, lot.ID, inputHash, AlgorithmVersion); findErr == nil {
 			return existing, nil
@@ -107,16 +164,33 @@ func (s ScheduleService) Calculate(ctx context.Context, input dto.ScheduleCalcul
 		return item, marshalErr
 	}
 	updates := map[string]any{"stages_json": string(stages), "recommended_changes_json": string(suggestions), "rule_evidence_json": string(evidence), "predicted_finish_at": result.FinishAt, "defect_risk_score": result.Risk, "explanation": result.Explanation}
-	updated, err := s.Repo.Transition(ctx, item.ID, constants.ScheduleCalculating, constants.ScheduleProposed, item.Version, updates)
-	if err != nil {
-		return item, err
+	var proposed model.DryingSchedule
+	if txErr := s.Repo.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updated, txErr := s.Repo.TransitionWithDB(ctx, tx, item.ID, constants.ScheduleCalculating, constants.ScheduleProposed, item.Version, updates)
+		if txErr != nil {
+			return txErr
+		}
+		if !updated {
+			return ErrConflict
+		}
+		if item.SupersedesScheduleID != "" {
+			// If a concurrent recalculation already claimed the predecessor's
+			// back-link, this plan still points at it one-way for traceability.
+			if _, linkErr := s.Repo.MarkReplacedByWithDB(ctx, tx, item.SupersedesScheduleID, item.ID, predecessorVersion); linkErr != nil {
+				return linkErr
+			}
+		}
+		return tx.WithContext(ctx).First(&proposed, "id = ?", item.ID).Error
+	}); txErr != nil {
+		return item, txErr
 	}
-	if !updated {
-		return item, ErrConflict
-	}
-	item.ScheduleState, item.Version = constants.ScheduleProposed, item.Version+1
+	item.ScheduleState, item.Version = constants.ScheduleProposed, proposed.Version
 	item.StagesJSON, item.RecommendedChangesJSON, item.RuleEvidenceJSON = string(stages), string(suggestions), string(evidence)
 	item.PredictedFinishAt, item.DefectRiskScore, item.Explanation = &result.FinishAt, result.Risk, result.Explanation
+	item.SupersedesScheduleID = proposed.SupersedesScheduleID
+	if item.SupersedesScheduleID != "" {
+		_ = s.Audit.Record(ctx, requestID, "schedule", item.SupersedesScheduleID, "replacement_linked", actor, nil, map[string]any{"superseded_schedule_id": item.SupersedesScheduleID, "replacement_schedule_id": item.ID})
+	}
 	_ = s.Audit.Record(ctx, requestID, "schedule", item.ID, "calculated", actor, nil, item)
 	return item, nil
 }
@@ -128,6 +202,9 @@ func (s ScheduleService) Review(ctx context.Context, id, decision, note, actor, 
 	}
 	if version != item.Version {
 		return item, ErrConflict
+	}
+	if item.ScheduleState == constants.ScheduleSuperseded {
+		return item, fmt.Errorf("superseded schedule cannot be reviewed: %w", ErrConflict)
 	}
 	if item.CreatedBy == actor && decision == constants.ScheduleAccepted {
 		return item, ErrForbidden
@@ -201,6 +278,9 @@ func (s ScheduleService) Freeze(ctx context.Context, id, actor, requestID string
 	}
 	if version != item.Version || item.FrozenAt != nil {
 		return item, ErrConflict
+	}
+	if item.ScheduleState == constants.ScheduleSuperseded {
+		return item, fmt.Errorf("superseded schedule cannot be frozen: %w", ErrConflict)
 	}
 	if item.ScheduleState != constants.ScheduleAccepted {
 		return item, ErrConflict

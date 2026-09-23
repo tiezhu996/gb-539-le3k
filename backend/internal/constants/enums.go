@@ -24,11 +24,12 @@ const (
 	ScheduleReviewed    = "reviewed"
 	ScheduleAccepted    = "accepted"
 	ScheduleVoided      = "voided"
+	ScheduleSuperseded  = "superseded"
 )
 
 var MoistureStages = []string{MoistureGreen, MoistureFiberSaturation, MoistureBoundWater, MoistureTarget}
 var LotStates = []string{LotQueued, LotConditioning, LotDrying, LotEqualizing, LotCompleted, LotAborted}
-var ScheduleStates = []string{ScheduleDraft, ScheduleCalculating, ScheduleProposed, ScheduleFailed, ScheduleReviewed, ScheduleAccepted, ScheduleVoided}
+var ScheduleStates = []string{ScheduleDraft, ScheduleCalculating, ScheduleProposed, ScheduleFailed, ScheduleReviewed, ScheduleAccepted, ScheduleVoided, ScheduleSuperseded}
 
 func ValidRole(role string) bool {
 	switch role {

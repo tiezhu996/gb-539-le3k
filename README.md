@@ -18,7 +18,7 @@ docker compose up -d --build
 - `/kilns`：窑炉档案、安全边界和编辑操作。
 - `/lots`：登记木材工艺批次，按 `queued -> conditioning -> drying -> equalizing -> completed` 迁移，任意运行阶段可中止。
 - `/readings`：导入含水率和干湿球读数，展示平均含水率曲线。
-- `/schedules`：按树种、厚度、读数和窑炉快照计算建议，展示风险、规则证据和人工审核。
+- `/schedules`：按树种、厚度、读数和窑炉快照计算建议，展示风险、规则证据和人工审核。读数补录、作废或修正会自动把同批次旧计划标为 `superseded`（过期），冻结旧计划仅保留快照；过期计划不能再审核或冻结；重新计算的计划指向被替代的旧计划。批次从均衡进入完成前要求最新计划已冻结。两个页面展示过期原因（读数补录/作废/修正）与替代关系。
 - `/audit`：按 request ID、实体和操作者查看前后快照。
 
 共享组件为 `MoistureStageBadge`、`DryingCurveChart`、`RuleEvidenceDrawer`；曲线计算交互封装在 `useScheduleSimulation`。四个实体在数据库、Go model/dto/repository/service/handler/router 与 Angular type/api/store/page 中均保持独立文件。

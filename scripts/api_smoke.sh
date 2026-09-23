@@ -47,8 +47,27 @@ call('POST','/api/v1/schedules/'+schedule['id']+'/freeze',{'version':accepted['v
 later_at=(datetime.now(timezone.utc).replace(microsecond=0)-timedelta(minutes=2)).isoformat().replace('+00:00','Z')
 later_readings={'timber_lot_id':lot['id'],'readings':[{'sample_position':'surface','measured_at':later_at,'moisture_pct':27,'dry_bulb_c':53,'wet_bulb_c':42},{'sample_position':'core','measured_at':later_at,'moisture_pct':31,'dry_bulb_c':53,'wet_bulb_c':42}]}
 call('POST','/api/v1/readings/import',later_readings,token=token,expected=[201])
+# Reading supplement must expire the previously frozen plan but keep its snapshot.
+expired,_=call('GET','/api/v1/schedules/'+schedule['id'],token=token,expected=[200]); expired=expired['data']
+if expired['schedule_state']!='superseded': raise SystemExit('old plan must be superseded: '+expired['schedule_state'])
+if not expired.get('frozen_snapshot') or not expired.get('superseded_reason'): raise SystemExit('superseded plan lost snapshot/reason')
+# Expired plans can no longer be reviewed or frozen (409, not 403).
+call('POST','/api/v1/schedules/'+schedule['id']+'/review',{'decision':'reviewed','version':expired['version']},token=reviewer,expected=[409])
+call('POST','/api/v1/schedules/'+schedule['id']+'/freeze',{'version':expired['version']},token=reviewer,expected=[409])
 current,_=call('POST','/api/v1/schedules/calculate',{'timber_lot_id':lot['id']},token=token,expected=[201]); current=current['data']
+if current.get('supersedes_schedule_id')!=schedule['id']: raise SystemExit('new plan must point at replaced plan')
+replaced,_=call('GET','/api/v1/schedules/'+schedule['id'],token=token,expected=[200]); replaced=replaced['data']
+if replaced.get('superseded_by_id')!=current['id']: raise SystemExit('old plan must name replacement')
 call('POST','/api/v1/schedules/'+current['id']+'/compare',{'baseline_schedule_id':schedule['id']},token=reviewer,expected=[200])
+# The lot cannot reach completed while the latest plan is not frozen.
+lot,_=call('POST','/api/v1/lots/'+lot['id']+'/transition',{'state':'drying','version':lot['version']},token=token,expected=[200]); lot=lot['data']
+lot,_=call('POST','/api/v1/lots/'+lot['id']+'/transition',{'state':'equalizing','version':lot['version']},token=token,expected=[200]); lot=lot['data']
+call('POST','/api/v1/lots/'+lot['id']+'/transition',{'state':'completed','version':lot['version']},token=token,expected=[409])
+# Freeze the newest plan, then completion is allowed.
+current,_=call('GET','/api/v1/schedules/'+current['id'],token=token,expected=[200]); current=current['data']
+current,_=call('POST','/api/v1/schedules/'+current['id']+'/review',{'decision':'accepted','note':'最新计划已核对','version':current['version']},token=reviewer,expected=[200]); current=current['data']
+current,_=call('POST','/api/v1/schedules/'+current['id']+'/freeze',{'version':current['version']},token=reviewer,expected=[200]); current=current['data']
+lot,_=call('POST','/api/v1/lots/'+lot['id']+'/transition',{'state':'completed','version':lot['version']},token=token,expected=[200]); lot=lot['data']
 call('GET','/api/v1/audit',token=reviewer,expected=[403])
 call('GET','/api/v1/audit',token=token,expected=[200])
 print('API smoke passed')

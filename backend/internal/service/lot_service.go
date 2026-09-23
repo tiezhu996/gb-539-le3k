@@ -14,9 +14,10 @@ import (
 )
 
 type LotService struct {
-	Repo  repository.LotRepository
-	Kilns repository.KilnRepository
-	Audit AuditService
+	Repo      repository.LotRepository
+	Kilns     repository.KilnRepository
+	Schedules repository.ScheduleRepository
+	Audit     AuditService
 }
 
 func (s LotService) List(ctx context.Context) ([]model.TimberLot, error) { return s.Repo.List(ctx) }
@@ -48,6 +49,21 @@ func (s LotService) Transition(ctx context.Context, id, next, actor, requestID s
 	}
 	if !validLotTransition(item.LotState, next) {
 		return item, ErrConflict
+	}
+	// Leaving equalizing closes the batch, so the shop-floor reference must be
+	// the newest frozen plan. If it is missing or stale the batch stays put and
+	// the caller is told a frozen plan is required.
+	if next == constants.LotCompleted {
+		latest, err := s.Schedules.LatestForLot(ctx, item.ID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return item, fmt.Errorf("latest schedule must be frozen before completion: %w", ErrConflict)
+		}
+		if err != nil {
+			return item, err
+		}
+		if latest.ScheduleState != constants.ScheduleAccepted || latest.FrozenAt == nil || latest.SupersededAt != nil {
+			return item, fmt.Errorf("latest schedule must be frozen before completion: %w", ErrConflict)
+		}
 	}
 	if version != item.Version {
 		return item, ErrConflict

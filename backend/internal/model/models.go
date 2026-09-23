@@ -76,6 +76,10 @@ type DryingSchedule struct {
 	FrozenAt               *time.Time `json:"frozen_at"`
 	FrozenBy               string     `json:"frozen_by"`
 	FrozenSnapshot         string     `json:"frozen_snapshot"`
+	SupersedesScheduleID   string     `gorm:"index" json:"supersedes_schedule_id"`
+	SupersededByID         string     `gorm:"index" json:"superseded_by_id"`
+	SupersededReason       string     `json:"superseded_reason"`
+	SupersededAt           *time.Time `json:"superseded_at"`
 	BaselineScheduleID     string     `gorm:"index" json:"baseline_schedule_id"`
 	ComparisonJSON         string     `json:"comparison_json"`
 	CalculatedAt           time.Time  `json:"calculated_at"`
